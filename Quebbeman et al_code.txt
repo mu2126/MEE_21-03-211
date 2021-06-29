@@ -1,0 +1,143 @@
+Quebbeman et al. 2021.
+PERCOLATION THRESHOLD ANALYSES CAN DETECT COMMUNITY ASSEMBLY PROCESSES IN SIMULATED AND NATURAL TREE COMMUNITIES
+Supplementary Methods: R Code
+Calculate percolation threshold (cmu~ d)
+#create storage object
+#n=number of points in each pattern
+#cmu is “probability that points are in the same cluster”; cmu_std is standardized by n
+#d is the distance; d_std is d standardized by n
+PercClust<-setClass("PercClust", representation( n="numeric", cmu="numeric", cmu_std="numeric", d="numeric",d_std="numeric"))
+
+#function calculating cmu for a range of d values
+critDfunIncrement<-function(ppSP, dstart, dinterval){
+	source("functions/connectedTorus.R")
+      d<-dstart
+      
+      #groups points within distance d in same cluster. Using torus edge correction
+	conns<-connected.torus(ppSP, d)
+	
+      #lists groups of points
+	conns.split<-split(1:conns$n, f=conns$marks)
+
+      #number of points in each cluster
+	cn<-unlist(lapply(conns.split, function(x) length(x)), F,F)
+
+      #total individuals in sample (sum to cn)	
+	n<-sum(cn)
+	cmu<- sum(cn^2)/sum(cn)
+	cmu_std<-cmu/n
+	
+      #calculation of cmu and d according to Plotkin et al. 2002 American Naturalist. Range of d varies for each SPP based on how quickly it reaches 0.95 threshold.
+	while(cmu_std[length(cmu_std)] < 0.95){	                
+		d<-d+dinterval
+		conns<-connected.torus(ppSP, d)
+		conns.split<-split(1:conns$n, f=conns$marks)
+		cn<-unlist(lapply(conns.split, function(x) length(x)), F,F)
+		n<-sum(cn)
+
+      #calculate mean cluster size or expected size of cluster containing random individual
+      #equation is sum (cn/n * cn) or sum(cn^2)/n
+		cmu<- c(cmu,sum(cn^2)/sum(cn))
+		#normalize cmu by n, probability that two random data points lie in the same cluster
+		cmu_std<-c(cmu_std,cmu[length(cmu)]/n)
+	}
+	
+	d<-seq(dstart, d+20*dinterval, by=dinterval )
+	diff<-length(d)-length(cmu_std)
+	
+      #normalize d by the average nearest neighbor distance (number of points per area of window)
+	d_std<-2*d*sqrt(ppSP$n/area.owin(ppSP$window))
+	cmu_std<-c(cmu_std, rep(1, 20))
+	output<-new("PercClust", n=n, cmu=cmu, cmu_std=cmu_std, d=d, d_std=d_std)
+	return(output)
+}
+
+      
+
+
+
+Apply thinning on generated point patterns
+
+bootClust<-function(kappa=NULL, scale=8, mu=10, wind=owin(c(50,250), c(100,400)), iter=100, prob=0.6, pois=F){
+	#create output object
+	output<-list("rand"=list("thin"=list(PercClust), "rm"=list(PercClust)), "env"=list("thin"=list(PercClust), "rm"=list(PercClust)), "ddm"=list("thin"=list(PercClust), "rm"=list(PercClust)))
+	#resample to generate uncertainty
+	for(i in 1:iter){
+		print(i)
+		#generate point pattern
+		if(pois==F){pp<-rThomas(kappa=kappa/mu, scale=scale,mu=mu,win=wind)}
+		if(pois==T){if(is.im(kappa)){kappa<-kappa[wind]}
+			pp<-rpoispp(lambda=kappa, win=wind, warnwin=F)}
+		
+		marks(pp)<-1:pp$n
+		
+		#random thinning
+		grand<-rthin(pp, prob)
+		pp.thin.r<-pp[grand$marks]
+		pp.rm.r<-pp[-grand$marks]
+		pp.thin.r<-unmark(pp.thin.r);pp.rm.r<-unmark(pp.rm.r)
+		rand=list("thin"=pp.thin.r, "rm"=pp.rm.r)
+		
+		#environmental filtering
+		prob.rescale<-eval.im(scales::rescale(concav, to=c(0,1)))
+	  prob.rescale[prob.rescale < .6]<-prob.rescale[prob.rescale < .6]^3
+		#prob.rescale[prob.rescale < .6]<-0.05
+		
+		K.p<-prob.rescale
+	
+		genv<-rthin(pp, K.p)
+		pp.thin.e<-pp[genv$marks]
+		pp.rm.e<-pp[-genv$marks]
+		pp.thin.e<-unmark(pp.thin.e);	pp.rm.e<-unmark(pp.rm.e)
+		env=list("thin"=pp.thin.e, "rm"=pp.rm.e)
+		
+		#ddm thinning
+		d<-density(pp, sigma=scale/2, positive=T)
+		K.p <- eval.im(1-d/max(d))
+		
+		gddm<-rthin(pp, K.p)
+			
+		pp.thin.d<-pp[gddm$marks]
+		pp.rm.d<-pp[-gddm$marks]
+		pp.thin.d<-unmark(pp.thin.d);pp.rm.d<-unmark(pp.rm.d)
+		ddm=list("thin"=pp.thin.d, "rm"=pp.rm.d)
+		
+		#apply percolation threshold to each point pattern
+		rand.dc<-lapply(rand, function(x) critDfun4boot(x,seq(2,50,.2)))
+		env.dc<-lapply(env, function(x) critDfun4boot(x,seq(2,50,.2)))
+		ddm.dc<-lapply(ddm, function(x) critDfun4boot(x,seq(2,50,.2)))
+		
+		output$rand$thin[[i]]<-rand.dc$thin; output$rand$rm[[i]]<-rand.dc$rm
+		output$env$thin[[i]]<-env.dc$thin; output$env$rm[[i]]<-env.dc$rm
+		output$ddm$thin[[i]]<-ddm.dc$thin; output$ddm$rm[[i]]<-ddm.dc$rm
+
+	}
+	return(output)
+	
+}
+
+Calculate dc for individual patterns and calculate pattern comparision
+library(mcp)
+mcp_dc<-function(remain, remove, status){
+	print(status)
+	d1<-data.frame("x"=remain@d_std, "y"=remain@cmu_std)
+	d2<-data.frame("x"=remove@d_std, "y"=remove@cmu_std)
+
+	#defines model formulation, Sets piece-wise regression to have continuous breakpoints with a slope varying by x for the second segment. 3 segments total. 
+	model<-list(y~1,
+			      y~0+x, 
+			      y~0)
+
+	fit_mcp1<-mcp(model, data=d1, par_x="x", adapt=1e4)
+	fit_mcp2<-mcp(model, data=d2, par_x="x", adapt=1e4)
+
+	coef1<-data.frame( fixef(fit_mcp1)[1:2,1:4], "type"="remaining")
+	coef2<-data.frame( fixef(fit_mcp2)[1:2,1:4], "type"="removed")
+	coefs<-rbind(coef1, coef2)
+
+	critDcDiff<-c("mean"=coefs[1,"mean"]-coefs[3, "mean"], 
+	  "upper"= coefs[1,"upper"]-coefs[3, "lower"], 
+	  "lower"=coefs[1,"lower"]-coefs[3, "upper"])
+	return(list("breaks"=coefs,"Dc"=critDcDiff))
+
+
